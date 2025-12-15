@@ -6,7 +6,7 @@
 # Description: Safely archives Docker Compose stacks (stop/tar/start),
 #             enforces local retention, and sends detailed ASCII email reports.
 # Author:      drgimpfen (https://github.com/drgimpfen)
-# Version:     1.2.3 
+# Version:     1.2.4 
 # Created:     2025-12-15
 # License:     MIT
 # ==============================================================================
@@ -266,8 +266,7 @@ def send_email_notification(disk_info, backup_content_size):
     except:
         hostname = "UNKNOWN_HOST"
         
-    current_date = datetime.now().strftime('%Y-%m-%d')
-    subject = f"{SUBJECT_TAG} {status}: Docker Backup completed on {hostname} ({current_date})"
+    subject = f"{SUBJECT_TAG} {status}: Docker Backup completed on {hostname}" 
     
     # Report formatting constants
     FILE_WIDTH = 50 
