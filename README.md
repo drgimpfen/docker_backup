@@ -9,7 +9,7 @@ Upon successful completion, the script performs local data cleanup (`Retention`)
 ## Features
 
 * **Zero-Downtime Strategy (Per-Stack):** The script executes the backup cycle (stop, archive, start) for **one stack at a time**. This limits the downtime to a single service for the shortest possible duration, maximizing the overall availability of your environment.
-* **Deduplication-Optimized Archives:** Creates uncompressed `.tar` archives, intentionally avoiding internal compression.
+* **Deduplication-Optimized Archives:** Creates uncompressed `.tar` archives, intentionally avoiding internal compression, which is ideal for subsequent processing by tools like BorgBackup.
 * **Local Retention:** Automatically deletes backups older than the configured value (default 28 days) and calculates the total disk space freed.
 * **Detailed Reporting:** Sends a comprehensive email report with status, a list of created archives, storage usage, and retention cleanup details.
 
