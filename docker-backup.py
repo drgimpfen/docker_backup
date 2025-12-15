@@ -1,4 +1,17 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+# ==============================================================================
+# Docker Stack Backup Script
+# ==============================================================================
+# Description: Safely archives Docker Compose stacks (stop/tar/start),
+#              enforces local retention, and sends detailed ASCII email reports.
+# Author:      gimpfenlord (https://github.com/gimpfenlord)
+# Version:     1.1.0
+# Created:     2025-12-15
+# License:     MIT
+# ==============================================================================
+
 import subprocess
 import os
 import sys
@@ -23,7 +36,6 @@ SMTP_USER = 'YOUR_API_KEY'
 SMTP_PASS = 'YOUR_API_SECRET'
 SENDER_EMAIL = 'sender@your-domain.com'
 RECEIVER_EMAIL = 'recipient@email.com'
-
 SUBJECT_TAG = "[DOCKER-BACKUP]"
 
 # Log file path
@@ -34,6 +46,7 @@ LOG_MESSAGES = []
 BACKUP_SUCCESSFUL = True
 NEW_ARCHIVES = [] # List of tuples: [(full_path, size_human_readable, size_bytes), ...]
 DELETED_FILES = [] # List of filenames deleted by retention
+DELETED_SIZE_BYTES = 0 # Total size of all files deleted by retention
 
 # --- HELPER FUNCTIONS ---
 
@@ -117,14 +130,14 @@ def create_archive(stack_name, base_dir, stack_path):
         result = run_command(command_list, f"Archiving {archive_name}")
     
     if result is not None:
-        # Get file size in human-readable format and in bytes
+        # Get file size in bytes
         size_bytes = 0
+        size_human = "N/A" 
         try:
-            size_human = subprocess.check_output(['du', '-h', target_filename]).decode('utf-8').split()[0]
             size_bytes = os.path.getsize(target_filename)
         except Exception:
-            size_human = "N/A"
-
+            pass
+        
         # Store the full path and both size formats
         relative_path = os.path.relpath(target_filename, "/") 
         NEW_ARCHIVES.append(('/' + relative_path, size_human, size_bytes))
@@ -132,8 +145,9 @@ def create_archive(stack_name, base_dir, stack_path):
 
 
 def cleanup_local_backups():
-    """Deletes old local archives based on retention days."""
+    """Deletes old local archives based on retention days and calculates freed space."""
     global DELETED_FILES
+    global DELETED_SIZE_BYTES
     TARGET_EXT = "tar"
     
     log(f"Starting local backup cleanup: deleting files older than {DAILY_RETENTION_DAYS} days.")
@@ -151,10 +165,16 @@ def cleanup_local_backups():
         files_to_delete = find_result.stdout.strip().split('\0')
         
         deleted_count = 0
+        DELETED_SIZE_BYTES = 0 # Reset counter
         for file_path in files_to_delete:
             if file_path:
                 try:
+                    # Get size before deletion
+                    size_bytes = os.path.getsize(file_path)
+                    
                     os.remove(file_path)
+                    DELETED_SIZE_BYTES += size_bytes
+                    
                     # Store full path for retention summary
                     relative_path = os.path.relpath(file_path, "/")
                     DELETED_FILES.append('/' + relative_path)
@@ -162,8 +182,10 @@ def cleanup_local_backups():
                     deleted_count += 1
                 except OSError as e:
                     log(f"Error deleting file {file_path}: {e}", "ERROR")
+                except FileNotFoundError:
+                    log(f"File not found during cleanup: {file_path}", "WARNING")
 
-        log(f"Local cleanup finished. Total files deleted: {deleted_count}")
+        log(f"Local cleanup finished. Total files deleted: {deleted_count}. Freed space: {format_bytes(DELETED_SIZE_BYTES)}")
     
     except subprocess.CalledProcessError as e:
         log(f"Error during find command execution: {e.stderr.strip()}", "ERROR")
@@ -172,7 +194,11 @@ def cleanup_local_backups():
 
 
 def get_disk_usage():
-    """Gets disk usage information for the BACKUP_DIR mount point."""
+    """Gets disk usage information for the BACKUP_DIR mount point and the actual backup content size."""
+    disk_info = None
+    backup_content_size = "N/A"
+
+    # 1. Get Mountpoint Disk Usage (df -h)
     try:
         df_result = run_command(["df", "-h", "--output=size,used,avail,pcent,target", BACKUP_DIR], "Checking disk usage")
         if df_result:
@@ -180,18 +206,33 @@ def get_disk_usage():
             if len(lines) > 1:
                 data = lines[1].split()
                 if len(data) >= 5:
-                    return {
+                    disk_info = {
                         "total": data[0], 
                         "used": data[1], 
                         "free": data[2], 
                         "percent": data[3],
                         "mount": data[4]
                     }
-        log("Could not parse disk usage data.", "WARNING")
-        return None
     except Exception as e:
-        log(f"Error getting disk usage: {e}", "ERROR")
-        return None
+        log(f"Error getting disk usage via df: {e}", "ERROR")
+
+    # 2. Get Backup Directory Content Size (du -sh)
+    try:
+        if os.path.isdir(BACKUP_DIR):
+            du_cmd = ["du", "-sh", BACKUP_DIR]
+            du_output = subprocess.check_output(du_cmd, text=True).split()
+            if du_output:
+                backup_content_size = du_output[0]
+        else:
+             log(f"Backup directory {BACKUP_DIR} not found for size calculation.", "WARNING")
+
+    except subprocess.CalledProcessError as e:
+        log(f"Error getting directory size via du: {e.stderr.strip()}", "ERROR")
+    except Exception as e:
+        log(f"An unexpected error occurred during du size check: {e}", "ERROR")
+    
+    return disk_info, backup_content_size
+
 
 def format_bytes(size_bytes):
     """Converts bytes to human-readable format (like du -h)."""
@@ -202,13 +243,12 @@ def format_bytes(size_bytes):
     while size_bytes >= 1024 and i < len(size_name) - 1:
         size_bytes /= 1024.
         i += 1
-    # Format to match the du -h style (e.g., 4.0K, 9.2G, 40M)
     if i == 0:
         return f"{int(size_bytes)}{size_name[i]}"
     return f"{size_bytes:.1f}{size_name[i]}"
 
 
-def send_email_notification(disk_info):
+def send_email_notification(disk_info, backup_content_size):
     """Sends a summary email notification."""
     
     status = "SUCCESS" if BACKUP_SUCCESSFUL else "FAILURE"
@@ -234,11 +274,11 @@ def send_email_notification(disk_info):
 
     if NEW_ARCHIVES:
         archive_rows = "\n".join([
-            f"{size_human:>{SIZE_WIDTH}}    {name:<{FILE_WIDTH}}" 
+            # Format human size using the format_bytes function and the stored bytes
+            f"{format_bytes(size_bytes):>{SIZE_WIDTH}}    {name:<{FILE_WIDTH}}" 
             for name, size_human, size_bytes in NEW_ARCHIVES
         ])
         
-        # Total line format
         total_line = f"{total_size_human:>{SIZE_WIDTH}}    {'TOTAL SIZE OF NEW ARCHIVES':<{FILE_WIDTH}}"
 
         archive_table = (
@@ -248,7 +288,7 @@ def send_email_notification(disk_info):
             f"{SEPARATOR}\n"
             f"{archive_rows}\n"
             f"{SEPARATOR}\n"
-            f"{total_line}\n"  # New Total Line
+            f"{total_line}\n"
             f"{SEPARATOR}\n"
         )
     else:
@@ -257,30 +297,30 @@ def send_email_notification(disk_info):
     # --- 2. DISK USAGE CHECK (Compact format) ---
     disk_summary = ""
     if disk_info:
-        # Custom formatting to match the example: Disk: / | Total: 1008G | Used: 196G | Usage: 21%
-        mount_label = disk_info['mount'].split('/')[-1] if disk_info['mount'] != '/' else '/'
-        disk_line = (
-            f"Disk: {mount_label} | "
+        disk_line_df = (
+            f"Disk: {disk_info['mount'].split('/')[-1] if disk_info['mount'] != '/' else '/'} | "
             f"Total: {disk_info['total']} | "
             f"Used: {disk_info['used']} | "
             f"Usage: {disk_info['percent']}"
         )
+        disk_line_du = f"Backup Content Size ({BACKUP_DIR}): {backup_content_size}"
+
         disk_summary = (
             f"DISK USAGE CHECK (on {disk_info['mount']}):\n"
             f"{SEPARATOR}\n"
-            f"{disk_line}\n"
+            f"{disk_line_df}\n"
+            f"{disk_line_du}\n"
             f"{SEPARATOR}\n"
         )
     else:
         disk_summary = "DISK USAGE CHECK:\n- Disk usage information not available.\n"
 
-    # --- 3. RETENTION TABLE (New Compact Format) ---
+    # --- 3. RETENTION TABLE (Compact Format with Freed Space) ---
     retention_table = (
         f"RETENTION CLEANUP (Older than {DAILY_RETENTION_DAYS} days):\n"
         f"{SEPARATOR}\n"
     )
     
-    # Determine the width needed for the retention list filename column
     RETENTION_WIDTH = FILE_WIDTH + SIZE_WIDTH + 5
     
     if DELETED_FILES:
@@ -290,10 +330,15 @@ def send_email_notification(disk_info):
             f"{name:<{RETENTION_WIDTH}}" 
             for name in DELETED_FILES
         ])
+        
+        freed_space_line = f"{format_bytes(DELETED_SIZE_BYTES):>{SIZE_WIDTH}}    {'TOTAL SPACE FREED':<{FILE_WIDTH}}"
+
         retention_table += (
             f"{'DELETED FILENAME':<{RETENTION_WIDTH}}\n"
             f"{SEPARATOR}\n"
             f"{retention_rows}\n"
+            f"{SEPARATOR}\n"
+            f"{freed_space_line}\n" 
             f"{SEPARATOR}\n"
         )
     else:
@@ -381,8 +426,8 @@ def main():
     cleanup_local_backups()
 
     # 5. FINALIZATION AND NOTIFICATION
-    disk_info = get_disk_usage()
-    send_email_notification(disk_info)
+    disk_info, backup_content_size = get_disk_usage()
+    send_email_notification(disk_info, backup_content_size)
 
     log("--- DOCKER BACKUP SCRIPT END ---")
     
