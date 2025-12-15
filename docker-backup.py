@@ -30,12 +30,13 @@ BACKUP_DIR = "/var/backups/docker"
 DAILY_RETENTION_DAYS = 28
 
 # Email Configuration
-SMTP_SERVER = 'in-v3.mailjet.com'
+SMTP_SERVER = 'your-mailserver.com'
 SMTP_PORT = 587
-SMTP_USER = 'YOUR_API_KEY'
-SMTP_PASS = 'YOUR_API_SECRET'
+SMTP_USER = 'username'
+SMTP_PASS = 'password'
 SENDER_EMAIL = 'sender@your-domain.com'
 RECEIVER_EMAIL = 'recipient@email.com'
+
 SUBJECT_TAG = "[DOCKER-BACKUP]"
 
 # Log file path
